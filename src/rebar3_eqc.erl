@@ -2,14 +2,16 @@
 %% ex: ts=4 sw=4 et
 
 -module(rebar3_eqc).
+-ifdef(EQC).
+
+-include_lib("eqc/include/eqc.hrl").
+-endif.
 
 -behaviour(provider).
 
 -export([init/1,
          do/1,
          format_error/1]).
-
--include_lib("eqc/include/eqc.hrl").
 
 -define(PROVIDER, eqc).
 -define(DEPS, [compile]).
@@ -20,40 +22,73 @@
 %% ===================================================================
 
 -spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
+-ifdef(EQC).
 init(State) ->
-    Provider = providers:create([{name, ?PROVIDER},
-                                 {module, ?MODULE},
-                                 {deps, ?DEPS},
-                                 {bare, true},
-                                 {example, "rebar3 eqc"},
-                                 {short_desc, "Run EQC properties."},
-                                 {desc, ""},
-                                 {opts, eqc_opts(State)},
-                                 {profiles, [test]}]),
-    State1 = rebar_state:add_provider(State, Provider),
-    State2 = rebar_state:add_to_profile(State1, test, test_state(State1)),
-    {ok, State2}.
+    case code:which(eqc) of
+        File when is_list(File) ->
+            Provider = providers:create([{name, ?PROVIDER},
+                                         {module, ?MODULE},
+                                         {deps, ?DEPS},
+                                         {bare, true},
+                                         {example, "rebar3 eqc"},
+                                         {short_desc, "Run EQC properties."},
+                                         {desc, ""},
+                                         {opts, eqc_opts(State)},
+                                         {profiles, [test]}]),
+            State1 = rebar_state:add_provider(State, Provider),
+            State2 = rebar_state:add_to_profile(State1, test, test_state(State1)),
+            {ok, State2};
+        _ ->
+            recompile(State, false, fun ?MODULE:init/1)
+    end.
+-else.
+init(State) ->
+    case code:which(eqc) of
+        File when is_list(File) ->
+            recompile(State, true, fun ?MODULE:init/1);
+        _ ->
+            Provider = providers:create([{name, ?PROVIDER},
+                                         {module, ?MODULE},
+                                         {deps, ?DEPS},
+                                         {bare, true},
+                                         {example, "rebar3 eqc"},
+                                         {short_desc, "Run EQC properties."},
+                                         {desc, "EQC is not available, please download and install it from quviq.com"},
+                                         {opts, []},
+                                         {profiles, [test]}]),
+            State1 = rebar_state:add_provider(State, Provider),
+            State2 = rebar_state:add_to_profile(State1, test, []),
+            {ok, State2}
+    end.
+-endif.
 
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
+-ifdef(EQC).
 do(State) ->
-    setup_name(State),
-    rebar_utils:update_code(rebar_state:code_paths(State, all_deps), [soft_purge]),
+    case code:which(eqc) of
+        File when is_list(File) ->
 
-    eqc:start(),
-    EqcOpts = resolve_eqc_opts(State),
+            setup_name(State),
+            rebar_utils:update_code(rebar_state:code_paths(State, all_deps), [soft_purge]),
 
-    SysConfigs = sys_config_list(EqcOpts),
-    Configs = lists:flatmap(fun(Filename) ->
-                               rebar_file_utils:consult_config(State, Filename)
-                            end, SysConfigs),
-    [application:load(Application) || Config <- Configs, {Application, _} <- Config],
-    reread_config(Configs, [update_logger]),
+            eqc:start(),
+            EqcOpts = resolve_eqc_opts(State),
 
-    case prepare_tests(State, EqcOpts) of
-        {ok, Tests} ->
-            do_tests(State, EqcOpts, Tests);
-        Error ->
-            Error
+            SysConfigs = sys_config_list(EqcOpts),
+            Configs = lists:flatmap(fun(Filename) ->
+                                            rebar_file_utils:consult_config(State, Filename)
+                                    end, SysConfigs),
+            [application:load(Application) || Config <- Configs, {Application, _} <- Config],
+            reread_config(Configs, [update_logger]),
+
+            case prepare_tests(State, EqcOpts) of
+                {ok, Tests} ->
+                    do_tests(State, EqcOpts, Tests);
+                Error ->
+                    Error
+            end;
+        _ ->
+            recompile(State, false, fun ?MODULE:do/1)
     end.
 
 sys_config_list(Opts) ->
@@ -66,6 +101,15 @@ sys_config_list(Opts) ->
         Configs ->
             [Configs]
     end.
+-else.
+do(State) ->
+    case code:which(eqc) of
+        File when is_list(File) ->
+            recompile(State, true, fun ?MODULE:do/1);
+        _ ->
+            {error, "EQC is not available, please check your installation or download the EQC installer from quviq.com"}
+    end.
+-endif.
 
 -spec format_error(any()) -> iolist().
 format_error(unknown_error) ->
@@ -77,6 +121,55 @@ format_error({properties_failed, FailedProps}) ->
 %% Internal functions
 %% ===================================================================
 
+maybe_replace(BEAMCode) ->
+    case code:which(?MODULE) of
+         File when is_list(File) ->
+            file:write_file(File, BEAMCode);
+        _ ->
+            ok
+    end.
+
+recompile(State, HasEQC, Fun) ->
+    case code:which(?MODULE) of
+        File when is_list(File) ->
+            case filelib:find_source(File) of
+                {ok, SrcFile} ->
+                    case filelib:is_regular(SrcFile) of
+                        true ->
+                            Def = case HasEQC of
+                                      true -> [{d, 'EQC'}];
+                                      false -> []
+                                  end,
+                            case compile:file(SrcFile, [binary|Def]) of
+                                {ok, ?MODULE, BEAMCode} ->
+                                    maybe_replace(BEAMCode),
+                                    code:purge(?MODULE),
+                                    code:delete(?MODULE),
+                                    case code:load_binary(?MODULE, atom_to_list(?MODULE)++".erl", BEAMCode) of
+                                        {module, ?MODULE} ->
+                                            Fun(State);
+                                        _ ->
+                                            rebar_api:console("failed to reload", []),
+                                            {ok, State}
+                                    end;
+                                _ ->
+                                    rebar_api:console("failed to compile", []),
+                                    {ok, State}
+                            end;
+                        false ->
+                            rebar_api:console("no source file", []),
+                            {ok, State}
+                    end;
+                _ ->
+                    rebar_api:console("no source file", []),
+                    {ok, State}
+            end;
+        _ ->
+            rebar_api:console("no module", []),
+            {ok, State}
+    end.
+
+-ifdef(EQC).
 do_tests(State, EqcOpts, _Tests) ->
     {EqcFun, TestQuantity} = numtests_or_testing_time(EqcOpts),
     CounterExMode = lists:member({counterexample, true}, EqcOpts),
@@ -654,3 +747,4 @@ reread_config(ConfigList, Opts) ->
         false ->
             rebar_utils:reread_config(ConfigList)
     end.
+-endif.

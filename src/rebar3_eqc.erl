@@ -5,6 +5,7 @@
 -ifdef(EQC).
 
 -include_lib("eqc/include/eqc.hrl").
+-endif.
 
 -behaviour(provider).
 
@@ -21,6 +22,7 @@
 %% ===================================================================
 
 -spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
+-ifdef(EQC).
 init(State) ->
     Provider = providers:create([{name, ?PROVIDER},
                                  {module, ?MODULE},
@@ -34,8 +36,29 @@ init(State) ->
     State1 = rebar_state:add_provider(State, Provider),
     State2 = rebar_state:add_to_profile(State1, eqc, test_state(State1)),
     {ok, State2}.
+-else.
+init(State) ->
+    case code:which(eqc) of
+        File when is_list(File) ->
+            recompile(State, fun ?MODULE:init/1);
+        _ ->
+            Provider = providers:create([{name, ?PROVIDER},
+                                         {module, ?MODULE},
+                                         {deps, ?DEPS},
+                                         {bare, true},
+                                         {example, "rebar3 eqc"},
+                                         {short_desc, "Run EQC properties."},
+                                         {desc, ""},
+                                         {opts, []},
+                                         {profiles, [eqc]}]),
+            State1 = rebar_state:add_provider(State, Provider),
+            State2 = rebar_state:add_to_profile(State1, eqc, []),
+            {ok, State2}
+    end.
+-endif.
 
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
+-ifdef(EQC).
 do(State) ->
     setup_name(State),
     rebar_utils:update_code(rebar_state:code_paths(State, all_deps), [soft_purge]),
@@ -48,6 +71,15 @@ do(State) ->
         Error ->
             Error
     end.
+-else.
+do(State) ->
+    case code:which(eqc) of
+        File when is_list(File) ->
+            recompile(State, fun ?MODULE:do/1);
+        _ ->
+            {ok, State}
+    end.
+-endif.
 
 -spec format_error(any()) -> iolist().
 format_error(unknown_error) ->
@@ -59,6 +91,44 @@ format_error({properties_failed, FailedProps}) ->
 %% Internal functions
 %% ===================================================================
 
+recompile(State, Fun) ->
+    case code:which(?MODULE) of
+        File when is_list(File) ->
+            case filelib:find_source(File) of
+                {ok, SrcFile} ->
+                    case filelib:is_regular(SrcFile) of
+                        true ->
+                            case compile:file(SrcFile, [binary, {d, 'EQC'}]) of
+                                {ok, ?MODULE, BEAMCode} ->
+                                    rebar_api:console("recompiled~n", []),
+                                    code:purge(?MODULE),
+                                    code:delete(?MODULE),
+                                    case code:load_binary(?MODULE, atom_to_list(?MODULE)++".erl", BEAMCode) of
+                                        {module, ?MODULE} ->
+                                            rebar_api:console("reloaded~n", []),
+                                            Fun(State);
+                                        _ ->
+                                            rebar_api:console("failed to load~n", []),
+                                            {ok, State}
+                                    end;
+                                _ ->
+                                    rebar_api:console("failed to compile~n", []),
+                                    {ok, State}
+                            end;
+                        false ->
+                            rebar_api:console("no source file~n", []),
+                            {ok, State}
+                    end;
+                _ ->
+                    rebar_api:console("no source file~n", []),
+                    {ok, State}
+            end;
+        _ ->
+            rebar_api:console("no module~n", []),
+            {ok, State}
+    end.
+
+-ifdef(EQC).
 do_tests(State, EqcOpts, _Tests) ->
     {EqcFun, TestQuantity} = numtests_or_testing_time(EqcOpts),
     CounterExMode = lists:member({counterexample, true}, EqcOpts),

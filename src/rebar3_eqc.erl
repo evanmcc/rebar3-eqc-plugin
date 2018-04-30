@@ -24,24 +24,8 @@
 -spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
 -ifdef(EQC).
 init(State) ->
-    Provider = providers:create([{name, ?PROVIDER},
-                                 {module, ?MODULE},
-                                 {deps, ?DEPS},
-                                 {bare, true},
-                                 {example, "rebar3 eqc"},
-                                 {short_desc, "Run EQC properties."},
-                                 {desc, ""},
-                                 {opts, eqc_opts(State)},
-                                 {profiles, [eqc]}]),
-    State1 = rebar_state:add_provider(State, Provider),
-    State2 = rebar_state:add_to_profile(State1, eqc, test_state(State1)),
-    {ok, State2}.
--else.
-init(State) ->
     case code:which(eqc) of
         File when is_list(File) ->
-            recompile(State, fun ?MODULE:init/1);
-        _ ->
             Provider = providers:create([{name, ?PROVIDER},
                                          {module, ?MODULE},
                                          {deps, ?DEPS},
@@ -49,6 +33,27 @@ init(State) ->
                                          {example, "rebar3 eqc"},
                                          {short_desc, "Run EQC properties."},
                                          {desc, ""},
+                                         {opts, eqc_opts(State)},
+                                         {profiles, [eqc]}]),
+            State1 = rebar_state:add_provider(State, Provider),
+            State2 = rebar_state:add_to_profile(State1, eqc, test_state(State1)),
+            {ok, State2};
+        _ ->
+            recompile(State, false, fun ?MODULE:init/1)
+    end.
+-else.
+init(State) ->
+    case code:which(eqc) of
+        File when is_list(File) ->
+            recompile(State, true, fun ?MODULE:init/1);
+        _ ->
+            Provider = providers:create([{name, ?PROVIDER},
+                                         {module, ?MODULE},
+                                         {deps, ?DEPS},
+                                         {bare, true},
+                                         {example, "rebar3 eqc"},
+                                         {short_desc, "Run EQC properties."},
+                                         {desc, "EQC is not available, please download and install it from quviq.com"},
                                          {opts, []},
                                          {profiles, [eqc]}]),
             State1 = rebar_state:add_provider(State, Provider),
@@ -60,22 +65,28 @@ init(State) ->
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
 -ifdef(EQC).
 do(State) ->
-    setup_name(State),
-    rebar_utils:update_code(rebar_state:code_paths(State, all_deps), [soft_purge]),
+    case code:which(eqc) of
+        File when is_list(File) ->
 
-    eqc:start(),
-    EqcOpts = resolve_eqc_opts(State),
-    case prepare_tests(State, EqcOpts) of
-        {ok, Tests} ->
-            do_tests(State, EqcOpts, Tests);
-        Error ->
-            Error
+            setup_name(State),
+            rebar_utils:update_code(rebar_state:code_paths(State, all_deps), [soft_purge]),
+
+            eqc:start(),
+            EqcOpts = resolve_eqc_opts(State),
+            case prepare_tests(State, EqcOpts) of
+                {ok, Tests} ->
+                    do_tests(State, EqcOpts, Tests);
+                Error ->
+                    Error
+            end;
+        _ ->
+            recompile(State, false, fun ?MODULE:do/1)
     end.
 -else.
 do(State) ->
     case code:which(eqc) of
         File when is_list(File) ->
-            recompile(State, fun ?MODULE:do/1);
+            recompile(State, true, fun ?MODULE:do/1);
         _ ->
             {ok, State}
     end.
@@ -91,40 +102,51 @@ format_error({properties_failed, FailedProps}) ->
 %% Internal functions
 %% ===================================================================
 
-recompile(State, Fun) ->
+maybe_replace(BEAMCode) ->
+    case code:which(?MODULE) of
+         File when is_list(File) ->
+            file:write_file(File, BEAMCode);
+        _ ->
+            ok
+    end.
+
+recompile(State, HasEQC, Fun) ->
     case code:which(?MODULE) of
         File when is_list(File) ->
             case filelib:find_source(File) of
                 {ok, SrcFile} ->
                     case filelib:is_regular(SrcFile) of
                         true ->
-                            case compile:file(SrcFile, [binary, {d, 'EQC'}]) of
+                            Def = case HasEQC of
+                                      true -> [{d, 'EQC'}];
+                                      false -> []
+                                  end,
+                            case compile:file(SrcFile, [binary|Def]) of
                                 {ok, ?MODULE, BEAMCode} ->
-                                    rebar_api:console("recompiled~n", []),
+                                    maybe_replace(BEAMCode),
                                     code:purge(?MODULE),
                                     code:delete(?MODULE),
                                     case code:load_binary(?MODULE, atom_to_list(?MODULE)++".erl", BEAMCode) of
                                         {module, ?MODULE} ->
-                                            rebar_api:console("reloaded~n", []),
                                             Fun(State);
                                         _ ->
-                                            rebar_api:console("failed to load~n", []),
+                                            rebar_api:console("failed to reload", []),
                                             {ok, State}
                                     end;
                                 _ ->
-                                    rebar_api:console("failed to compile~n", []),
+                                    rebar_api:console("failed to compile", []),
                                     {ok, State}
                             end;
                         false ->
-                            rebar_api:console("no source file~n", []),
+                            rebar_api:console("no source file", []),
                             {ok, State}
                     end;
                 _ ->
-                    rebar_api:console("no source file~n", []),
+                    rebar_api:console("no source file", []),
                     {ok, State}
             end;
         _ ->
-            rebar_api:console("no module~n", []),
+            rebar_api:console("no module", []),
             {ok, State}
     end.
 

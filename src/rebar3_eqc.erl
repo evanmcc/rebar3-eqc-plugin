@@ -88,7 +88,7 @@ do(State) ->
         File when is_list(File) ->
             recompile(State, true, fun ?MODULE:do/1);
         _ ->
-            {ok, State}
+            {error, "EQC is not available, please check your installation or download the EQC installer from quviq.com"}
     end.
 -endif.
 

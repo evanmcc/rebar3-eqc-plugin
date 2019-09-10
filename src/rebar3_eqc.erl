@@ -189,7 +189,12 @@ numtests_or_testing_time(Opts) ->
 properties(Modules) ->
     lists:flatten(
       [lists:filtermap(property_filter_fun(M),
-                       M:module_info(exports)) || M <- Modules]).
+                       get_module_exports(M)) || M <- Modules]).
+
+get_module_exports(M) ->
+    try M:module_info(exports)
+    catch _:_ -> []
+    end.
 
 -type property_filter_fun() :: fun(({atom(), non_neg_integer()}) ->
                                           boolean() | {true, {atom(), atom()}}).
